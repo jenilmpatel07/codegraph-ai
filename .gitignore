@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+node_modules/
+.next/
+postgres_data/
+cloned_repos/
+.DS_Store
