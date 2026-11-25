@@ -77,7 +77,7 @@ class ASTCodeParser:
         parser = self._get_lang_parser(language)
         tree = parser.parse(source_bytes)
         target_types = TARGET_NODE_TYPES[language]
-        rel_path = str(file_path.relative_to(repo_root)) if repo_root else str(file_path)
+        rel_path = str(repo_root) if isinstance(repo_root, str) else (str(file_path.relative_to(repo_root)) if repo_root else str(file_path))
 
         chunks: List[CodeChunk] = []
 

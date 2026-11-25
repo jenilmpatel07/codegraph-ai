@@ -1,4 +1,6 @@
 import os
+from pathlib import Path
+
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
@@ -8,6 +10,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, HttpUrl
 from sqlalchemy.orm import Session
 
@@ -16,7 +19,7 @@ from app.ingestion.repo_ingestor import RepoIngestor
 from app.retrieval.hybrid_search import HybridCodeSearcher
 from app.retrieval.qa_engine import CitationQAEngine
 
-app = FastAPI(title="CodeGraph AI Engine", version="0.3.0")
+app = FastAPI(title="CodeGraph AI Engine", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,6 +29,7 @@ app.add_middleware(
 )
 
 ingestor = RepoIngestor()
+STATIC_INDEX = Path(__file__).parent / "static" / "index.html"
 
 
 @app.on_event("startup")
@@ -55,6 +59,11 @@ class AskRequest(BaseModel):
     repo_name: str
     question: str
     top_k: int = 5
+
+
+@app.get("/")
+def serve_ui():
+    return FileResponse(STATIC_INDEX)
 
 
 @app.get("/health")

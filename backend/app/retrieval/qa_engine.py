@@ -32,7 +32,7 @@ class CitationQAEngine:
             headers={"Content-Type": "application/json"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=25) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 return data.get("response", "").strip() or None
         except Exception:
@@ -60,29 +60,44 @@ class CitationQAEngine:
             },
         )
         try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with urllib.request.urlopen(req, timeout=25) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 return data["choices"][0]["message"]["content"].strip()
         except Exception:
             return None
 
-    def _build_extractive_answer(self, question: str, chunks: List[Dict[str, Any]]) -> str:
-        lines = [
-            f"Based on static AST and hybrid retrieval for `{question}`, here are the verified code definitions:\n"
-        ]
-        for idx, c in enumerate(chunks, start=1):
-            calls_str = ", ".join(c["calls"][:6]) if c["calls"] else "none"
-            first_doc = ""
-            for raw_line in c["code"].splitlines()[1:6]:
-                cleaned = raw_line.strip().strip('"\'')
-                if cleaned and not cleaned.startswith(("def ", "class ", "@")):
-                    first_doc = f" — {cleaned}"
-                    break
-            lines.append(
-                f"{idx}. **`{c['symbol_name']}`** (`{c['node_type']}`) at `[{c['citation']}]`{first_doc}\n"
-                f"   - Outgoing calls: `{calls_str}`"
+    def _build_graph_extractive_answer(self, question: str, chunks: List[Dict[str, Any]]) -> str:
+        doc_chunks = [c for c in chunks if c["node_type"] in ("documentation", "module_docstring")]
+        code_chunks = [c for c in chunks if c["node_type"] not in ("documentation", "module_docstring")]
+
+        sections: List[str] = []
+        if doc_chunks:
+            lead = doc_chunks[0]
+            summary_lines = [
+                ln.strip().lstrip("#").strip()
+                for ln in lead["code"].splitlines()
+                if ln.strip() and not ln.strip().startswith(("===", "---", ".. ", "::", '"""'))
+            ][:4]
+            sections.append(
+                f"Overview (`[{lead['citation']}]`):\n" + " ".join(summary_lines)
             )
-        return "\n".join(lines)
+
+        if code_chunks:
+            lines = ["Core AST Definitions & 1-Hop Call Graph:"]
+            for idx, c in enumerate(code_chunks, start=1):
+                neighbors = c.get("graph_neighbors") or []
+                neighbor_str = (
+                    ", ".join(f"{nb['symbol_name']} [{nb['citation']}]" for nb in neighbors[:3])
+                    if neighbors
+                    else (", ".join(c["calls"][:4]) or "leaf symbol")
+                )
+                lines.append(
+                    f"{idx}. `{c['symbol_name']}` ({c['node_type']}) at `[{c['citation']}]`\n"
+                    f"   -> 1-Hop Dependencies: {neighbor_str}"
+                )
+            sections.append("\n".join(lines))
+
+        return "\n\n".join(sections)
 
     def ask(self, repo_name: str, question: str, db: Session, top_k: int = 5) -> Dict[str, Any]:
         key = self._cache_key(repo_name, question)
@@ -104,17 +119,24 @@ class CitationQAEngine:
                 "engine": "none",
             }
 
-        context_blocks = "\n\n".join(
-            f"[{c['citation']}] ({c['node_type']} {c['symbol_name']})\n{c['code'][:1800]}"
-            for c in chunks
-        )
+        context_blocks = []
+        for c in chunks:
+            neighbors = c.get("graph_neighbors") or []
+            hop_text = ""
+            if neighbors:
+                hop_text = "\n1-Hop Callees:\n" + "\n".join(
+                    f"  - {nb['symbol_name']} [{nb['citation']}]: {nb['signature']}" for nb in neighbors
+                )
+            context_blocks.append(
+                f"[{c['citation']}] ({c['node_type']} {c['symbol_name']})\n{c['code'][:1600]}{hop_text}"
+            )
+
         prompt = (
-            "You are a senior software architect answering questions strictly from the provided AST code snippets.\n"
+            "You are a principal software architect answering questions strictly from the provided AST snippets, documentation, and 1-hop call-graph neighbors.\n"
             "Every claim MUST cite exact file paths and line numbers using `[file_path:start-end]`.\n"
-            "Do not invent symbols or behavior not shown in the snippets.\n\n"
+            "Do not invent symbols or behavior not shown in the context.\n\n"
             f"Question: {question}\n\n"
-            f"Code Context:\n{context_blocks}\n\n"
-            "Answer:"
+            f"GraphRAG Context:\n" + "\n\n".join(context_blocks) + "\n\nAnswer:"
         )
 
         engine = "ollama"
@@ -123,8 +145,8 @@ class CitationQAEngine:
             engine = "openai_compatible"
             answer = self._try_openai_compatible(prompt)
         if not answer:
-            engine = "ast_extractive"
-            answer = self._build_extractive_answer(question, chunks)
+            engine = "graphrag_extractive"
+            answer = self._build_graph_extractive_answer(question, chunks)
 
         response_payload = {
             "repo_name": repo_name,
@@ -138,6 +160,7 @@ class CitationQAEngine:
                     "file_path": c["file_path"],
                     "lines": c["lines"],
                     "rrf_score": c["rrf_score"],
+                    "code": c["code"],
                 }
                 for c in chunks
             ],

@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CodeGraph AI — Repository AST & Citation-Locked Q&A</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col font-sans">
+  <!-- Top Navbar -->
+  <header class="border-b border-slate-800 bg-slate-900/90 px-6 py-4 flex flex-wrap items-center justify-between gap-4">
+    <div class="flex items-center gap-3">
+      <div class="h-8 w-8 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-white">CG</div>
+      <div>
+        <h1 class="text-lg font-semibold tracking-tight">CodeGraph AI Engine</h1>
+        <p class="text-xs text-slate-400">AST Dependency Graph • pgvector Hybrid Search • Citation-Locked Q&A</p>
+      </div>
+    </div>
+
+    <div class="flex flex-wrap items-center gap-2">
+      <input id="repoUrlInput" type="text" placeholder="https://github.com/pallets/click"
+        class="bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-sm w-72 focus:outline-none focus:border-indigo-500" />
+      <button id="ingestBtn" onclick="ingestRepo()"
+        class="bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium px-4 py-1.5 rounded-lg transition">
+        Ingest Repo
+      </button>
+      <div class="h-6 w-px bg-slate-800 mx-1"></div>
+      <input id="activeRepoInput" type="text" value="click" placeholder="repo_name"
+        class="bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-sm w-36 focus:outline-none focus:border-emerald-500" />
+      <button onclick="loadGraph()"
+        class="bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-medium px-3 py-1.5 rounded-lg border border-slate-700 transition">
+        Load Graph
+      </button>
+    </div>
+  </header>
+
+  <div id="statusBanner" class="hidden bg-indigo-950/80 border-b border-indigo-800 px-6 py-2 text-xs text-indigo-200"></div>
+
+  <!-- Main Workspace -->
+  <main class="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-0 overflow-hidden">
+    <!-- Left: Interactive AST Graph -->
+    <section class="lg:col-span-7 border-r border-slate-800 flex flex-col min-h-[540px]">
+      <div class="px-5 py-3 border-b border-slate-800/80 flex items-center justify-between bg-slate-900/40">
+        <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">AST Call & Dependency Graph</span>
+        <span id="graphStats" class="text-xs text-slate-400">Ready</span>
+      </div>
+      <div id="graphCanvas" class="w-full h-[560px] bg-slate-950"></div>
+      <div id="nodeInspector" class="border-t border-slate-800 bg-slate-900/70 px-5 py-3 text-xs text-slate-300">
+        Click any node in the graph to inspect its file path, AST type, and exact line range.
+      </div>
+    </section>
+
+    <!-- Right: Citation-Locked Code Q&A -->
+    <section class="lg:col-span-5 flex flex-col bg-slate-900/30 min-h-[540px]">
+      <div class="px-5 py-3 border-b border-slate-800/80 flex items-center justify-between bg-slate-900/40">
+        <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Citation-Locked Code Q&A</span>
+        <span id="engineBadge" class="text-[11px] px-2 py-0.5 rounded bg-slate-800 text-slate-300">Hybrid RRF</span>
+      </div>
+
+      <div id="qaOutput" class="flex-1 p-5 overflow-y-auto space-y-4 text-sm leading-relaxed">
+        <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 text-slate-300">
+          Ask any architectural or implementation question about the indexed repository. Every claim is locked to verified <code class="text-indigo-400">[file_path:start-end]</code> AST citations.
+        </div>
+      </div>
+
+      <div class="p-4 border-t border-slate-800 bg-slate-900/80 flex gap-2">
+        <input id="questionInput" type="text"
+          placeholder="How does click parse command line options and arguments?"
+          onkeydown="if(event.key==='Enter') askQuestion()"
+          class="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3.5 py-2 text-sm focus:outline-none focus:border-indigo-500" />
+        <button id="askBtn" onclick="askQuestion()"
+          class="bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition">
+          Ask
+        </button>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    let network = null;
+
+    function showStatus(msg) {
+      const el = document.getElementById("statusBanner");
+      el.textContent = msg;
+      el.classList.remove("hidden");
+    }
+
+    async function ingestRepo() {
+      const repoUrl = document.getElementById("repoUrlInput").value.trim();
+      if (!repoUrl) return;
+      const btn = document.getElementById("ingestBtn");
+      btn.disabled = true;
+      btn.textContent = "Indexing...";
+      showStatus(`Cloning and indexing ${repoUrl} into pgvector...`);
+      try {
+        const res = await fetch("/api/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ repo_url: repoUrl })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Ingestion failed");
+        document.getElementById("activeRepoInput").value = data.repo_name;
+        showStatus(`Indexed ${data.repo_name}: ${data.files_scanned} files scanned, ${data.nodes_indexed} AST nodes stored.`);
+        await loadGraph();
+      } catch (err) {
+        showStatus(`Error: ${err.message}`);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Ingest Repo";
+      }
+    }
+
+    async function loadGraph() {
+      const repoName = document.getElementById("activeRepoInput").value.trim();
+      if (!repoName) return;
+      document.getElementById("graphStats").textContent = "Loading graph...";
+      try {
+        const res = await fetch(`/api/graph/${encodeURIComponent(repoName)}`);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Graph not found");
+
+        // Cap rendered nodes at 220 for smooth browser physics while keeping connected hubs
+        const degree = {};
+        data.edges.forEach(e => {
+          degree[e.source] = (degree[e.source] || 0) + 1;
+          degree[e.target] = (degree[e.target] || 0) + 1;
+        });
+        const sortedNodes = [...data.nodes].sort((a, b) => (degree[b.id] || 0) - (degree[a.id] || 0)).slice(0, 220);
+        const visibleIds = new Set(sortedNodes.map(n => n.id));
+        const visibleEdges = data.edges.filter(e => visibleIds.has(e.source) && visibleIds.has(e.target)).slice(0, 450);
+
+        const visNodes = new vis.DataSet(sortedNodes.map(n => ({
+          id: n.id,
+          label: n.label,
+          color: n.type.includes("class") ? "#6366f1" : "#10b981",
+          font: { color: "#e2e8f0", size: 12 },
+          shape: "dot",
+          size: Math.min(10 + (degree[n.id] || 0) * 1.5, 28),
+          meta: n
+        })));
+
+        const visEdges = new vis.DataSet(visibleEdges.map(e => ({
+          from: e.source,
+          to: e.target,
+          arrows: "to",
+          color: { color: "#334155", highlight: "#818cf8" }
+        })));
+
+        const container = document.getElementById("graphCanvas");
+        network = new vis.Network(container, { nodes: visNodes, edges: visEdges }, {
+          physics: { stabilization: { iterations: 120 }, barnesHut: { gravitationalConstant: -3500 } },
+          interaction: { hover: true }
+        });
+
+        network.on("click", params => {
+          if (params.nodes.length > 0) {
+            const node = visNodes.get(params.nodes[0]).meta;
+            document.getElementById("nodeInspector").innerHTML =
+              `<strong class="text-indigo-400">${node.label}</strong> (${node.type}) — ` +
+              `<code class="text-emerald-400">${node.file_path}:${node.lines}</code> [${node.language}]`;
+          }
+        });
+
+        document.getElementById("graphStats").textContent =
+          `Showing ${sortedNodes.length} of ${data.nodes.length} AST nodes • ${visibleEdges.length} call edges`;
+      } catch (err) {
+        document.getElementById("graphStats").textContent = err.message;
+      }
+    }
+
+    async function askQuestion() {
+      const repoName = document.getElementById("activeRepoInput").value.trim();
+      const question = document.getElementById("questionInput").value.trim();
+      if (!repoName || !question) return;
+
+      const btn = document.getElementById("askBtn");
+      btn.disabled = true;
+      btn.textContent = "Searching...";
+
+      const out = document.getElementById("qaOutput");
+      out.innerHTML = `<div class="p-4 rounded-xl bg-slate-900 border border-slate-800 text-slate-400 animate-pulse">Running hybrid pgvector + lexical RRF search on <strong>${repoName}</strong>...</div>`;
+
+      try {
+        const res = await fetch("/api/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ repo_name: repoName, question, top_k: 5 })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Query failed");
+
+        document.getElementById("engineBadge").textContent =
+          `${data.engine}${data.cached ? " • cached" : ""}`;
+
+        const citationCards = data.citations.map(c => `
+          <div class="p-2.5 rounded-lg bg-slate-950 border border-slate-800 flex items-center justify-between text-xs">
+            <div>
+              <span class="font-semibold text-indigo-400">${c.symbol_name}</span>
+              <span class="text-slate-500 ml-1">(${c.node_type})</span>
+              <div class="text-emerald-400 font-mono mt-0.5">[${c.citation}]</div>
+            </div>
+            <span class="text-slate-500 font-mono">RRF ${c.rrf_score}</span>
+          </div>
+        `).join("");
+
+        out.innerHTML = `
+          <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 whitespace-pre-wrap text-slate-200">${data.answer}</div>
+          <div class="space-y-2">
+            <div class="text-xs font-semibold uppercase tracking-wider text-slate-400">Verified AST Citations</div>
+            ${citationCards}
+          </div>
+        `;
+      } catch (err) {
+        out.innerHTML = `<div class="p-4 rounded-xl bg-red-950/50 border border-red-800 text-red-200">${err.message}</div>`;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Ask";
+      }
+    }
+
+    window.addEventListener("DOMContentLoaded", loadGraph);
+  </script>
+</body>
+</html>
