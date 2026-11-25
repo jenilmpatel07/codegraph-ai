@@ -1,10 +1,6 @@
-__pycache__/
-*.py[cod]
 .venv/
-venv/
-.env
-node_modules/
-.next/
-postgres_data/
+__pycache__/
+*.pyc
 cloned_repos/
+.env
 .DS_Store
