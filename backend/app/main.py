@@ -1,3 +1,11 @@
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl
@@ -5,8 +13,10 @@ from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal, init_db, CodeNode
 from app.ingestion.repo_ingestor import RepoIngestor
+from app.retrieval.hybrid_search import HybridCodeSearcher
+from app.retrieval.qa_engine import CitationQAEngine
 
-app = FastAPI(title="CodeGraph AI Engine", version="0.1.0")
+app = FastAPI(title="CodeGraph AI Engine", version="0.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -33,6 +43,18 @@ def get_db():
 
 class IngestRequest(BaseModel):
     repo_url: HttpUrl
+
+
+class SearchRequest(BaseModel):
+    repo_name: str
+    query: str
+    top_k: int = 5
+
+
+class AskRequest(BaseModel):
+    repo_name: str
+    question: str
+    top_k: int = 5
 
 
 @app.get("/health")
@@ -81,3 +103,19 @@ def get_dependency_graph(repo_name: str, db: Session = Depends(get_db)):
                     )
 
     return {"repo_name": repo_name, "nodes": graph_nodes, "edges": graph_edges}
+
+
+@app.post("/api/search")
+def hybrid_search(payload: SearchRequest, db: Session = Depends(get_db)):
+    searcher = HybridCodeSearcher(ingestor.embedder)
+    matches = searcher.search(payload.repo_name, payload.query, db, top_k=payload.top_k)
+    if not matches:
+        raise HTTPException(status_code=404, detail="No matching code nodes found")
+    return {"repo_name": payload.repo_name, "query": payload.query, "results": matches}
+
+
+@app.post("/api/ask")
+def ask_codebase(payload: AskRequest, db: Session = Depends(get_db)):
+    searcher = HybridCodeSearcher(ingestor.embedder)
+    qa = CitationQAEngine(searcher)
+    return qa.ask(payload.repo_name, payload.question, db, top_k=payload.top_k)
